@@ -4,6 +4,26 @@ pragma solidity 0.8.23;
 contract SPECTERAnnouncer {
 
     // -------------------------------------------------------------------------
+    // Events
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dev ERC-5564 Announcement event.
+     *      Three indexed topics: schemeId, stealthAddress, caller.
+     *      Non-indexed: ephemeralPubKey (1088-byte ML-KEM ciphertext), metadata.
+     *
+     *      Indexed schemeId allows scanners to filter exclusively for SCHEME_ID=1000
+     *      without touching secp256k1 (schemeId=1) announcements.
+     */
+    event Announcement(
+        uint256 indexed schemeId,
+        address indexed stealthAddress,
+        address indexed caller,
+        bytes ephemeralPubKey,
+        bytes metadata
+    );
+
+    // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
 
