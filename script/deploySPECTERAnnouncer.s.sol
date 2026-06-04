@@ -6,19 +6,18 @@ import {SPECTERAnnouncer} from "../src/SPECTERAnnouncer.sol";
 
 contract deploySPECTERAnnouncer is Script {
     // Nick's deterministic deployer — confirmed present on Monad
-    address constant CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    // address constant CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     // Salt: keccak256("specterpq.announcer.v1")
     // This produces the same address on testnet and mainnet.
     bytes32 constant SALT = keccak256("specterpq.announcer.v1");
 
     function run() external {
-        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast();
 
         // Compute the expected CREATE2 address before deploying
         bytes memory initCode = type(SPECTERAnnouncer).creationCode;
-        address expected = computeCreate2Address(SALT, keccak256(initCode), CREATE2_FACTORY);
+        address expected = vm.computeCreate2Address(SALT, keccak256(initCode), CREATE2_FACTORY);
         console2.log("Expected address:", expected);
 
         // Deploy via Nick's factory
@@ -31,7 +30,7 @@ contract deploySPECTERAnnouncer is Script {
         address deployed = address(uint160(bytes20(ret)));
         console2.log("Deployed SPECTERAnnouncer at:", deployed);
         console2.log("Deploy block recorded in contract immutable: deployBlock");
-        require(deployed == expected, "Address mismatch — salt collision?");
+        require(deployed == expected, "Address mismatch: salt collision?");
 
         vm.stopBroadcast();
     }
