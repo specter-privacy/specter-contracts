@@ -57,4 +57,36 @@ contract SPECTERAnnouncer {
             metadata
         );
     }
+
+    function announce(
+        uint256 schemeId,
+        address stealthAddress,
+        bytes calldata ephemeralPubKey,
+        bytes calldata metadata
+    ) external {
+        require(
+            schemeId == SCHEME_ID,
+            "SPECTERAnnouncer: schemeId must equal SCHEME_ID"
+        );
+        require(
+            ephemeralPubKey.length == EPHEMERAL_KEY_LENGTH,
+            "SPECTERAnnouncer: ephemeralPubKey must be 1088 bytes (ML-KEM-768 ciphertext)"
+        );
+        require(
+            metadata.length >= 1,
+            "SPECTERAnnouncer: metadata must contain at least the view_tag (1 byte)"
+        );
+        require(
+            stealthAddress != address(0),
+            "SPECTERAnnouncer: stealthAddress cannot be zero"
+        );
+
+        emit Announcement(
+            SCHEME_ID,
+            stealthAddress,
+            msg.sender,
+            ephemeralPubKey,
+            metadata
+        );
+    }
 }
