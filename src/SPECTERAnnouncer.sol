@@ -4,6 +4,25 @@ pragma solidity 0.8.23;
 contract SPECTERAnnouncer {
 
     // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
+
+    /// @notice Provisional scheme ID for SpecterPQ's ML-KEM-768 stealth address scheme.
+    ///         Update to the registered ERC value when ERC-XXXX is accepted.
+    uint256 public constant SCHEME_ID = 1000;
+
+    /// @notice Expected byte length of an ML-KEM-768 ciphertext (ephemeralPubKey).
+    uint256 public constant EPHEMERAL_KEY_LENGTH = 1088;
+
+    // -------------------------------------------------------------------------
+    // Immutables
+    // -------------------------------------------------------------------------
+
+    /// @notice Block number at which this contract was deployed.
+    ///         Scanners use this as the fromBlock for eth_getLogs calls.
+    uint256 public immutable deployBlock;
+
+    // -------------------------------------------------------------------------
     // Events
     // -------------------------------------------------------------------------
 
