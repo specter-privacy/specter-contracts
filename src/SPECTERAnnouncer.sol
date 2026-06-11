@@ -1,173 +1,159 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.23;
+pragma solidity 0.8.26;
+
+import {ISPECTERAnnouncer} from "./interfaces/ISPECTERAnnouncer.sol";
 
 /**
  * @title  SPECTERAnnouncer
- * @notice ERC-5564-compatible announcer for SpecterPQ's ML-KEM-768 stealth address scheme.
+ * @author SpecterPQ : Pranshu Rastogi
+ * @notice On-chain announcement registry for SpecterPQ stealth payments on Monad.
  *
- * @dev    Emits ERC-5564 `Announcement` events with a SpecterPQ-specific schemeId.
- *         This contract has NO state, NO admin keys, and is NOT upgradeable.
- *         It is a pure event emitter — one LOG4 per call.
+ * @dev    ARCHITECTURE
+ *         ─────────────────────────────────────────────────────────────────────
+ *         SPECTERAnnouncer is a stateless, permissionless event emitter for the
+ *         SpecterPQ post-quantum stealth address scheme. It has no storage, no
+ *         owner, no admin keys, and is not upgradeable. Every call resolves to a
+ *         single LOG3 opcode plus input validation. There are no SSTORE operations.
  *
- * Deployment:
- *   Deployed via CREATE2 using the deterministic deployer at
- *   0x4e59b44847b379578588920cA78FbF26c0B4956C (Nick's factory) on both
- *   Monad testnet (chainId 10143) and Monad mainnet (chainId 143).
- *   Salt: keccak256("specterpq.announcer.v1")
+ *         EPHEMERAL KEY DESIGN
+ *         ─────────────────────────────────────────────────────────────────────
+ *         ML-KEM-768 produces a 1,088-byte ciphertext. Emitting it in the event
+ *         log would add over 1 KB to every announcement. Instead:
  *
- * Scheme ID:
- *   SCHEME_ID = 1000 (provisional; update to the registered value when
- *   ERC-XXXX: Post-Quantum Stealth Addresses is accepted)
+ *           - Only keccak256(ephemeralPubKey) is stored in the event log (32 bytes).
+ *           - The full ciphertext is passed as calldata, permanently archived
+ *             on-chain and retrievable via eth_getTransactionByHash.
+ *           - Scanners fetch the ciphertext only for the ~1/256 events that pass
+ *             the view_tag filter, making the extra RPC call negligible.
  *
- * EphemeralPubKey:
- *   The ML-KEM-768 ciphertext — exactly 1,088 bytes.
- *   (NIST FIPS 203: ML-KEM-768 ciphertext is 1,088 bytes)
+ *         Log data is therefore 109 bytes per announcement (32-byte hash +
+ *         77-byte metadata) regardless of ciphertext size.
  *
- * Metadata byte layout (all fields packed, no ABI encoding):
- *   [0]        view_tag     uint8   required  — 1-byte scan filter
- *   [1..32]    tx_hash      bytes32 optional  — 0x00..00 = absent
- *   [33..64]   amount       uint256 optional  — big-endian wei; 0 = absent
- *   [65..76]   channel_id   bytes12 optional  — Yellow channel; 0x00..00 = absent
- *   Total: 77 bytes (fixed-length; pad with zeros for absent fields)
+ *         SCANNING PROTOCOL
+ *         ─────────────────────────────────────────────────────────────────────
+ *         1. eth_getLogs(address=SPECTERAnnouncer, fromBlock=deployBlock)
+ *         2. For each Announcement event:
+ *              a. Read metadata[0] (view_tag). Discard if no match (~255/256 filtered).
+ *              b. On match: eth_getTransactionByHash → ABI-decode calldata.
+ *              c. Assert keccak256(ciphertext) == ephemeralKeyHash (integrity check).
+ *              d. ML-KEM.Decaps(recipientSecretKey, ciphertext) → sharedSecret.
+ *              e. Derive stealth private key from sharedSecret.
  *
- * Minimum valid metadata: 1 byte (view_tag only). Scanner handles short payloads.
+ *         SCHEME IDENTIFIER
+ *         ─────────────────────────────────────────────────────────────────────
+ *         SCHEME_ID = 1000 is the provisional SpecterPQ scheme identifier.
+ *         schemeId is emitted as a non-indexed field — this contract's address
+ *         is the unique filter for all SCHEME_ID = 1000 announcements.
+ *
+ *         METADATA LAYOUT
+ *         ─────────────────────────────────────────────────────────────────────
+ *         Raw-packed, no ABI encoding. Multi-byte fields are big-endian.
+ *         Absent optional fields MUST be zero-padded.
+ *
+ *           Offset   Field        Type      Notes
+ *           ──────   ──────────   ───────   ────────────────────────────────
+ *           [0]      view_tag     uint8     Required. 1-byte scan filter.
+ *           [1..32]  tx_hash      bytes32   Optional. Source-chain tx hash.
+ *           [33..64] amount       uint256   Optional. Transfer value in wei.
+ *           [65..76] channel_id   bytes12   Optional. Application channel.
+ *
+ *         Minimum valid metadata: 1 byte (view_tag only).
+ *         Maximum defined layout: 77 bytes.
+ *
+ *         DEPLOYMENT
+ *         ─────────────────────────────────────────────────────────────────────
+ *         Deployed deterministically via CREATE2 using Nick's factory
+ *         (0x4e59b44847b379578588920cA78FbF26c0B4956C).
+ *         Salt: keccak256("specterpq.announcer.v1")
+ *         Same address on every EVM chain where the factory is present.
  */
+contract SPECTERAnnouncer is ISPECTERAnnouncer {
 
-contract SPECTERAnnouncer {
+    // ─── Constants ────────────────────────────────────────────────────────────────
 
-    // -------------------------------------------------------------------------
-    // Constants
-    // -------------------------------------------------------------------------
-
-    /// @notice Provisional scheme ID for SpecterPQ's ML-KEM-768 stealth address scheme.
-    ///         Update to the registered ERC value when ERC-XXXX is accepted.
+    /// @inheritdoc ISPECTERAnnouncer
     uint256 public constant SCHEME_ID = 1000;
 
-    /// @notice Expected byte length of an ML-KEM-768 ciphertext (ephemeralPubKey).
+    /// @inheritdoc ISPECTERAnnouncer
     uint256 public constant EPHEMERAL_KEY_LENGTH = 1088;
 
-    // -------------------------------------------------------------------------
-    // Immutables
-    // -------------------------------------------------------------------------
+    /// @inheritdoc ISPECTERAnnouncer
+    uint256 public constant MAX_BATCH = 50;
 
-    /// @notice Block number at which this contract was deployed.
-    ///         Scanners use this as the fromBlock for eth_getLogs calls.
+    // ─── Immutables ───────────────────────────────────────────────────────────────
+
+    /// @inheritdoc ISPECTERAnnouncer
     uint256 public immutable deployBlock;
 
-    // -------------------------------------------------------------------------
-    // Events
-    // -------------------------------------------------------------------------
-
-    /**
-     * @dev ERC-5564 Announcement event.
-     *      Three indexed topics: schemeId, stealthAddress, caller.
-     *      Non-indexed: ephemeralPubKey (1088-byte ML-KEM ciphertext), metadata.
-     *
-     *      Indexed schemeId allows scanners to filter exclusively for SCHEME_ID=1000
-     *      without touching secp256k1 (schemeId=1) announcements.
-     */
-    event Announcement(
-        uint256 indexed schemeId,
-        address indexed stealthAddress,
-        address indexed caller,
-        bytes ephemeralPubKey,
-        bytes metadata
-    );
-
-    // -------------------------------------------------------------------------
-    // Constructor
-    // -------------------------------------------------------------------------
+    // ─── Constructor ──────────────────────────────────────────────────────────────
 
     constructor() {
         deployBlock = block.number;
     }
 
-    // -------------------------------------------------------------------------
-    // External functions
-    // -------------------------------------------------------------------------
+    // ─── External ─────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Announce a SpecterPQ stealth payment.
-     *
-     * @param stealthAddress  Derived stealth address that received the funds.
-     * @param ephemeralPubKey ML-KEM-768 ciphertext; MUST be exactly 1088 bytes.
-     * @param metadata        Packed metadata; byte[0] MUST be the view_tag.
-     *                        Full layout in contract header.
-     *
-     * @dev   Gas profile (estimated):
-     *          Base tx:          21,000
-     *          LOG4 base:         1,500
-     *          LOG4 per topic:    1,500 × 3 = 4,500
-     *          Calldata (1165B):  ~4,660   (4 gas/zero byte, 16/nonzero)
-     *          LOG data (1165B):  8 × 1165 = 9,320
-     *          Total est.:       ~41,000 gas
-     *
-     *        On Monad, gas is charged on gas_limit (not gas_used).
-     *        Set gasLimit = 60,000 in the frontend to give 46% headroom.
-     */
+    /// @inheritdoc ISPECTERAnnouncer
     function announce(
-        address stealthAddress,
+        address        stealthAddress,
         bytes calldata ephemeralPubKey,
         bytes calldata metadata
     ) external {
-        require(
-            ephemeralPubKey.length == EPHEMERAL_KEY_LENGTH,
-            "SPECTERAnnouncer: ephemeralPubKey must be 1088 bytes (ML-KEM-768 ciphertext)"
-        );
-        require(
-            metadata.length >= 1,
-            "SPECTERAnnouncer: metadata must contain at least the view_tag (1 byte)"
-        );
-        require(
-            stealthAddress != address(0),
-            "SPECTERAnnouncer: stealthAddress cannot be zero"
-        );
-
-        emit Announcement(
-            SCHEME_ID,
-            stealthAddress,
-            msg.sender,
-            ephemeralPubKey,
-            metadata
-        );
+        _announce(stealthAddress, ephemeralPubKey, metadata);
     }
 
-    /**
-     * @notice ERC-5564-compatible overload that accepts schemeId as a parameter.
-     *         Callers that build transactions using the canonical IERC5564Announcer ABI
-     *         can use this overload. Reverts if schemeId != SCHEME_ID.
-     *
-     * @dev    Having both overloads avoids ABI-compatibility issues with tooling that
-     *         hardcodes the 4-argument announce() signature from ERC-5564.
-     */
+    /// @inheritdoc ISPECTERAnnouncer
+    /// @dev Reverts with SchemeMismatch if schemeId != SCHEME_ID.
     function announce(
-        uint256 schemeId,
-        address stealthAddress,
+        uint256        schemeId,
+        address        stealthAddress,
         bytes calldata ephemeralPubKey,
         bytes calldata metadata
     ) external {
-        require(
-            schemeId == SCHEME_ID,
-            "SPECTERAnnouncer: schemeId must equal SCHEME_ID"
-        );
-        require(
-            ephemeralPubKey.length == EPHEMERAL_KEY_LENGTH,
-            "SPECTERAnnouncer: ephemeralPubKey must be 1088 bytes (ML-KEM-768 ciphertext)"
-        );
-        require(
-            metadata.length >= 1,
-            "SPECTERAnnouncer: metadata must contain at least the view_tag (1 byte)"
-        );
-        require(
-            stealthAddress != address(0),
-            "SPECTERAnnouncer: stealthAddress cannot be zero"
-        );
+        if (schemeId != SCHEME_ID) revert SchemeMismatch(schemeId, SCHEME_ID);
+        _announce(stealthAddress, ephemeralPubKey, metadata);
+    }
+
+    /// @inheritdoc ISPECTERAnnouncer
+    /// @dev Recommended batch size: 10–50. A validation failure on any element
+    ///      reverts the entire transaction.
+    function announceMany(
+        address[]  calldata stealthAddresses,
+        bytes[]    calldata ephemeralPubKeys,
+        bytes[]    calldata metadatas
+    ) external {
+        uint256 n = stealthAddresses.length;
+        if (n == 0) revert BatchEmpty();
+        if (n > MAX_BATCH) revert BatchTooLarge(n, MAX_BATCH);
+        if (ephemeralPubKeys.length != n || metadatas.length != n)
+            revert BatchLengthMismatch();
+
+        for (uint256 i; i < n;) {
+            _announce(stealthAddresses[i], ephemeralPubKeys[i], metadatas[i]);
+            unchecked { ++i; }
+        }
+    }
+
+    // ─── Internal ─────────────────────────────────────────────────────────────────
+
+    /// @dev Shared validation and emission path for all announce entry points.
+    function _announce(
+        address        stealthAddress,
+        bytes calldata ephemeralPubKey,
+        bytes calldata metadata
+    ) internal {
+        if (stealthAddress == address(0))
+            revert ZeroStealthAddress();
+        if (ephemeralPubKey.length != EPHEMERAL_KEY_LENGTH)
+            revert EphemeralKeyLength(ephemeralPubKey.length, EPHEMERAL_KEY_LENGTH);
+        if (metadata.length == 0)
+            revert MetadataRequired();
 
         emit Announcement(
             SCHEME_ID,
             stealthAddress,
             msg.sender,
-            ephemeralPubKey,
+            keccak256(ephemeralPubKey),
             metadata
         );
     }
